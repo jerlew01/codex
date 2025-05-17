@@ -60,7 +60,15 @@ logging.basicConfig(
 logger = logging.getLogger("ip_preserver")
 
 # Global variables
-PROXY_PORT_START = 8080
+# PROXY_PORT allows overriding the default proxy port via environment variable.
+# When set, all sessions will use this fixed port so the Proxifier rule only
+# needs to point to a single HTTP proxy.
+DEFAULT_PROXY_PORT = 8080
+PROXY_PORT = int(os.getenv("PROXY_PORT", DEFAULT_PROXY_PORT))
+PROXY_DYNAMIC_PORTS = os.getenv("PROXY_DYNAMIC", "false").lower() == "true"
+LOCAL_PROXY = f"http://127.0.0.1:{PROXY_PORT}"
+REQUEST_PROXIES = {"http": LOCAL_PROXY, "https": LOCAL_PROXY}
+PROXY_PORT_START = PROXY_PORT
 DNS_PORT_START = 10053
 active_proxies = {}  # port -> {server, thread, ip}
 active_dns_servers = {}  # port -> {server, thread, ip}
@@ -949,9 +957,9 @@ class IPSpoofManager:
         for service in services:
             try:
                 response = requests.get(
-                    service, 
-                    timeout=5, 
-                    proxies={"http": None, "https": None},
+                    service,
+                    timeout=5,
+                    proxies=REQUEST_PROXIES,
                     headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                         'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -1429,9 +1437,9 @@ class AdvancedIPManager:
         for service in services:
             try:
                 response = requests.get(
-                    service, 
-                    timeout=5, 
-                    proxies={"http": None, "https": None},
+                    service,
+                    timeout=5,
+                    proxies=REQUEST_PROXIES,
                     headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                         'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -1891,9 +1899,9 @@ def get_current_ip():
         try:
             logger.debug(f"Checking IP using {service}...")
             response = requests.get(
-                service, 
+                service,
                 timeout=3,  # Shorter timeout
-                proxies={"http": None, "https": None},
+                proxies=REQUEST_PROXIES,
                 headers={
                     "User-Agent": "Mozilla/5.0",
                     "Cache-Control": "no-cache, no-store, must-revalidate"
@@ -1938,10 +1946,10 @@ def verify_current_ip():
     for service in services:
         try:
             response = requests.get(
-                service, 
+                service,
                 timeout=3,
                 headers={"Cache-Control": "no-cache", "User-Agent": "Mozilla/5.0"},
-                proxies={"http": None, "https": None}  # Ensure direct connection
+                proxies=REQUEST_PROXIES
             )
             if response.status_code == 200:
                 ip = response.text.strip()
@@ -2222,10 +2230,12 @@ def start_identity_proxy(identity_ip, tether_interface=None, tether_ip=None):
             logger.info(f"Using existing proxy for IP {identity_ip} on port {port}")
             return port
     
-    # Try up to 5 different ports in case of conflicts
-    for attempt in range(1, 6):
+    # Use a single fixed port unless PROXY_DYNAMIC_PORTS is enabled
+    max_attempts = 5 if PROXY_DYNAMIC_PORTS else 1
+    for attempt in range(1, max_attempts + 1):
         port = PROXY_PORT_START
-        PROXY_PORT_START += 1
+        if PROXY_DYNAMIC_PORTS:
+            PROXY_PORT_START += 1
         
         logger.info(f"Attempt {attempt}: Starting proxy on port {port} for IP {identity_ip}")
         
@@ -2236,8 +2246,12 @@ def start_identity_proxy(identity_ip, tether_interface=None, tether_ip=None):
             sock.close()
             
             if result == 0:
-                logger.warning(f"Port {port} is already in use, trying another port")
-                continue
+                if PROXY_DYNAMIC_PORTS:
+                    logger.warning(f"Port {port} is already in use, trying another port")
+                    continue
+                else:
+                    logger.error(f"Port {port} is already in use")
+                    return None
             
             # Create a proxy server that binds outgoing connections to tethering interface if available
             server = IPIdentityProxyServer(('127.0.0.1', port), IPIdentityProxyHandler, identity_ip, tether_interface)
